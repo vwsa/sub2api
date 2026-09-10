@@ -1616,6 +1616,33 @@ export default {
       rateLimited: 'Rate Limited',
       usageError: 'Fetch Error'
     },
+    deviceBindings: {
+      title: 'Device Management',
+      description: 'Inspect user devices bound to OpenAI upstream accounts and release device slots that are no longer needed.',
+      disabled: 'Device binding is currently disabled. No new binding records will be created.',
+      activeDevices: 'Active devices',
+      upstreamAccounts: 'Accounts in use',
+      policy: 'Current policy',
+      policyValue: '{count} per account · release after {days} idle days',
+      searchPlaceholder: 'Search user, API key, upstream account, or device hash',
+      visibleCount: 'Showing {visible} of {total}',
+      device: 'Device',
+      userAndKey: 'User / API key',
+      account: 'Upstream account',
+      activity: 'Last active / expiry',
+      firstSeen: 'First seen',
+      empty: 'No active devices',
+      emptyHint: 'Bindings appear after a user sends an OMP request with a device identity.',
+      noMatches: 'No matching devices',
+      expired: 'Expired',
+      expiresInHours: 'Releases in {hours} hours',
+      expiresInDays: 'Releases in {days} days',
+      unbind: 'Unbind',
+      unbindConfirm: 'Unbind device {device} owned by {owner}? Its next request will claim a slot again.',
+      unbindSuccess: 'Device binding removed',
+      unbindFailed: 'Failed to remove device binding',
+      loadFailed: 'Failed to load device bindings'
+    },
 
     // Scheduled Tests
 }

@@ -303,3 +303,25 @@ func TestClassifySelectionFailureError_StillUpgradesNonModelNotFoundFallback(t *
 	require.Equal(t, "rate_limit_error", got.ErrType)
 	require.False(t, got.ModelNotFound)
 }
+
+func TestClassifySelectionFailureError_OpenAIDeviceBindingFailures(t *testing.T) {
+	fallback := noAccountErrorClassification{
+		Status:  http.StatusServiceUnavailable,
+		ErrType: "api_error",
+		Message: "fallback",
+	}
+	tests := []struct {
+		err     error
+		status  int
+		errType string
+	}{
+		{service.ErrOpenAIDeviceIDRequired, http.StatusBadRequest, "device_id_required"},
+		{service.ErrOpenAIDeviceLimit, http.StatusForbidden, "device_limit_exceeded"},
+		{service.ErrOpenAIDeviceBoundAway, http.StatusServiceUnavailable, "device_account_unavailable"},
+	}
+	for _, tt := range tests {
+		got := classifySelectionFailureError(tt.err, fallback)
+		require.Equal(t, tt.status, got.Status)
+		require.Equal(t, tt.errType, got.ErrType)
+	}
+}

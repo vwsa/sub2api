@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,9 @@ import (
 
 const stickySessionPrefix = "sticky_session:"
 const openAIResponsesSessionWindowPrefix = "openai_responses_session_window:"
+const openAIDeviceBindingPrefix = "openai_device_binding:"
+const openAIDeviceBindingMetaPrefix = "openai_device_binding_meta:"
+const openAIAccountDevicesPrefix = "openai_account_devices:"
 const liveCallPrefix = "live:call:"
 
 type gatewayCache struct {
@@ -68,6 +72,205 @@ func (c *gatewayCache) RefreshSessionTTL(ctx context.Context, groupID int64, ses
 func (c *gatewayCache) DeleteSessionAccountID(ctx context.Context, groupID int64, sessionHash string) error {
 	key := buildSessionKey(groupID, sessionHash)
 	return c.rdb.Del(ctx, key).Err()
+}
+
+func buildOpenAIDeviceBindingKey(deviceHash string) string {
+	return openAIDeviceBindingPrefix + deviceHash
+}
+func buildOpenAIDeviceBindingMetaKey(deviceHash string) string {
+	return openAIDeviceBindingMetaPrefix + deviceHash
+}
+
+func buildOpenAIAccountDevicesKey(accountID int64) string {
+	return fmt.Sprintf("%s%d", openAIAccountDevicesPrefix, accountID)
+}
+
+var claimOpenAIDeviceBindingScript = redis.NewScript(`
+local function touch_metadata()
+  redis.call('HSETNX', KEYS[3], 'first_seen', ARGV[2])
+  redis.call('HSET', KEYS[3],
+    'account_id', ARGV[1],
+    'user_id', ARGV[7],
+    'api_key_id', ARGV[8],
+    'api_key_name', ARGV[9],
+    'last_seen', ARGV[2])
+  redis.call('PEXPIRE', KEYS[1], ARGV[5])
+  redis.call('PEXPIRE', KEYS[2], ARGV[5])
+  redis.call('PEXPIRE', KEYS[3], ARGV[5])
+end
+
+local existing = redis.call('GET', KEYS[1])
+if existing then
+  if existing ~= ARGV[1] then
+    return {2, existing}
+  end
+  redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[3])
+  redis.call('ZADD', KEYS[2], ARGV[2], ARGV[4])
+  touch_metadata()
+  return {1, existing}
+end
+
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[3])
+if redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[6]) then
+  return {3, 0}
+end
+
+if not redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[5], 'NX') then
+  existing = redis.call('GET', KEYS[1])
+  if existing == ARGV[1] then
+    redis.call('ZADD', KEYS[2], ARGV[2], ARGV[4])
+    touch_metadata()
+    return {1, existing}
+  end
+  return {2, existing or 0}
+end
+
+redis.call('ZADD', KEYS[2], ARGV[2], ARGV[4])
+touch_metadata()
+return {1, ARGV[1]}
+`)
+
+func (c *gatewayCache) ClaimOpenAIDeviceBinding(
+	ctx context.Context,
+	deviceHash string,
+	accountID int64,
+	principal service.OpenAIDevicePrincipal,
+	maxDevices int,
+	idleTTL time.Duration,
+) (service.OpenAIDeviceBindingClaim, error) {
+	if c == nil || c.rdb == nil {
+		return service.OpenAIDeviceBindingClaim{}, errors.New("gateway cache unavailable")
+	}
+	if strings.TrimSpace(deviceHash) == "" || accountID <= 0 || maxDevices <= 0 || idleTTL <= 0 {
+		return service.OpenAIDeviceBindingClaim{}, errors.New("invalid OpenAI device binding claim")
+	}
+	now := time.Now()
+	result, err := claimOpenAIDeviceBindingScript.Run(
+		ctx,
+		c.rdb,
+		[]string{
+			buildOpenAIDeviceBindingKey(deviceHash),
+			buildOpenAIAccountDevicesKey(accountID),
+			buildOpenAIDeviceBindingMetaKey(deviceHash),
+		},
+		accountID,
+		now.UnixMilli(),
+		now.Add(-idleTTL).UnixMilli(),
+		deviceHash,
+		idleTTL.Milliseconds(),
+		maxDevices,
+		principal.UserID,
+		principal.APIKeyID,
+		principal.APIKeyName,
+	).Slice()
+	if err != nil {
+		return service.OpenAIDeviceBindingClaim{}, err
+	}
+	if len(result) != 2 {
+		return service.OpenAIDeviceBindingClaim{}, fmt.Errorf("unexpected OpenAI device binding result: %v", result)
+	}
+	status, err := strconv.ParseInt(fmt.Sprint(result[0]), 10, 64)
+	if err != nil {
+		return service.OpenAIDeviceBindingClaim{}, fmt.Errorf("parse OpenAI device binding status: %w", err)
+	}
+	boundAccountID, err := strconv.ParseInt(fmt.Sprint(result[1]), 10, 64)
+	if err != nil {
+		return service.OpenAIDeviceBindingClaim{}, fmt.Errorf("parse OpenAI device binding account: %w", err)
+	}
+	return service.OpenAIDeviceBindingClaim{
+		Allowed:        status == 1,
+		BoundAccountID: boundAccountID,
+		CapacityFull:   status == 3,
+	}, nil
+}
+
+var deleteOpenAIDeviceBindingScript = redis.NewScript(`
+local account_id = redis.call('GET', KEYS[1])
+if not account_id then
+  account_id = redis.call('HGET', KEYS[2], 'account_id')
+end
+if account_id then
+  redis.call('ZREM', 'openai_account_devices:' .. account_id, ARGV[1])
+end
+redis.call('DEL', KEYS[1], KEYS[2])
+return account_id or 0
+`)
+
+func (c *gatewayCache) ListOpenAIDeviceBindings(ctx context.Context, maxDevices int) ([]service.OpenAIDeviceBinding, error) {
+	if c == nil || c.rdb == nil {
+		return nil, errors.New("gateway cache unavailable")
+	}
+	keys := make([]string, 0)
+	iter := c.rdb.Scan(ctx, 0, openAIDeviceBindingMetaPrefix+"*", 100).Iterator()
+	for iter.Next(ctx) {
+		keys = append(keys, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
+		return []service.OpenAIDeviceBinding{}, nil
+	}
+
+	pipe := c.rdb.Pipeline()
+	metadataCommands := make([]*redis.MapStringStringCmd, len(keys))
+	ttlCommands := make([]*redis.DurationCmd, len(keys))
+	for i, key := range keys {
+		metadataCommands[i] = pipe.HGetAll(ctx, key)
+		ttlCommands[i] = pipe.PTTL(ctx, key)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	bindings := make([]service.OpenAIDeviceBinding, 0, len(keys))
+	for i, key := range keys {
+		metadata := metadataCommands[i].Val()
+		ttl := ttlCommands[i].Val()
+		if len(metadata) == 0 || ttl <= 0 {
+			continue
+		}
+		accountID, accountErr := strconv.ParseInt(metadata["account_id"], 10, 64)
+		firstSeen, firstErr := strconv.ParseInt(metadata["first_seen"], 10, 64)
+		lastSeen, lastErr := strconv.ParseInt(metadata["last_seen"], 10, 64)
+		if accountErr != nil || firstErr != nil || lastErr != nil || accountID <= 0 {
+			continue
+		}
+		userID, _ := strconv.ParseInt(metadata["user_id"], 10, 64)
+		apiKeyID, _ := strconv.ParseInt(metadata["api_key_id"], 10, 64)
+		bindings = append(bindings, service.OpenAIDeviceBinding{
+			DeviceHash:     strings.TrimPrefix(key, openAIDeviceBindingMetaPrefix),
+			AccountID:      accountID,
+			UserID:         userID,
+			APIKeyID:       apiKeyID,
+			APIKeyName:     metadata["api_key_name"],
+			FirstSeenAt:    time.UnixMilli(firstSeen),
+			LastSeenAt:     time.UnixMilli(lastSeen),
+			ExpiresAt:      now.Add(ttl),
+			MaxDeviceCount: maxDevices,
+		})
+	}
+	sort.Slice(bindings, func(i, j int) bool {
+		return bindings[i].LastSeenAt.After(bindings[j].LastSeenAt)
+	})
+	return bindings, nil
+}
+
+func (c *gatewayCache) DeleteOpenAIDeviceBinding(ctx context.Context, deviceHash string) error {
+	if c == nil || c.rdb == nil {
+		return errors.New("gateway cache unavailable")
+	}
+	_, err := deleteOpenAIDeviceBindingScript.Run(
+		ctx,
+		c.rdb,
+		[]string{
+			buildOpenAIDeviceBindingKey(deviceHash),
+			buildOpenAIDeviceBindingMetaKey(deviceHash),
+		},
+		deviceHash,
+	).Result()
+	return err
 }
 
 var claimOpenAIResponsesSessionWindowScript = redis.NewScript(`

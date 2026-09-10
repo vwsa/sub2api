@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -41,6 +42,26 @@ var selectionModelRateLimitedPattern = regexp.MustCompile(`(?:model_rate_limited
 func classifySelectionFailureError(err error, fallback noAccountErrorClassification) noAccountErrorClassification {
 	if err == nil {
 		return fallback
+	}
+	switch {
+	case errors.Is(err, service.ErrOpenAIDeviceIDRequired):
+		return noAccountErrorClassification{
+			Status:  http.StatusBadRequest,
+			ErrType: "device_id_required",
+			Message: "A stable x-codex-installation-id header is required.",
+		}
+	case errors.Is(err, service.ErrOpenAIDeviceLimit):
+		return noAccountErrorClassification{
+			Status:  http.StatusForbidden,
+			ErrType: "device_limit_exceeded",
+			Message: "All eligible upstream accounts have reached the active-device limit.",
+		}
+	case errors.Is(err, service.ErrOpenAIDeviceBoundAway):
+		return noAccountErrorClassification{
+			Status:  http.StatusServiceUnavailable,
+			ErrType: "device_account_unavailable",
+			Message: "This device remains bound to an upstream account that is currently unavailable.",
+		}
 	}
 	// A 404 model_not_found fallback is authoritative and must not be downgraded
 	// to a rate-limit verdict. classifyNoAccountError only reaches it through

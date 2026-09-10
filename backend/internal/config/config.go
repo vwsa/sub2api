@@ -944,6 +944,16 @@ const (
 	ImageConcurrencyOverflowModeWait   = "wait"
 )
 
+type GatewayOpenAIDeviceBindingConfig struct {
+	// Enabled pins each downstream installation to one OpenAI OAuth account.
+	Enabled bool `mapstructure:"enabled"`
+	// MaxDevicesPerAccount is the maximum number of installations active within
+	// IdleTTLDays for one upstream subscription account.
+	MaxDevicesPerAccount int `mapstructure:"max_devices_per_account"`
+	// IdleTTLDays releases a device slot after this many days without requests.
+	IdleTTLDays int `mapstructure:"idle_ttl_days"`
+}
+
 // GatewayConfig API网关相关配置
 type GatewayConfig struct {
 	// 等待上游响应头的超时时间（秒），0表示无超时
@@ -1010,6 +1020,9 @@ type GatewayConfig struct {
 	Live GatewayLiveConfig `mapstructure:"live"`
 	// OpenAIScheduler: OpenAI 高级调度器粘性逃逸配置
 	OpenAIScheduler GatewayOpenAISchedulerConfig `mapstructure:"openai_scheduler"`
+	// OpenAIDeviceBinding limits and pins downstream installations per OpenAI
+	// OAuth subscription account.
+	OpenAIDeviceBinding GatewayOpenAIDeviceBindingConfig `mapstructure:"openai_device_binding"`
 	// OpenAIHTTP2: OpenAI HTTP 上游协议策略（默认启用 HTTP/2，可按代理能力回退 HTTP/1.1）
 	OpenAIHTTP2 GatewayOpenAIHTTP2Config `mapstructure:"openai_http2"`
 	// OpenAIProxyStreamCircuit: Responses SSE 代理断流熔断策略。
@@ -2376,6 +2389,9 @@ func setDefaults() {
 	viper.SetDefault("gateway.codex_image_generation_bridge_enabled", false)
 	viper.SetDefault("gateway.openai_passthrough_allow_timeout_headers", false)
 	viper.SetDefault("gateway.openai_compact_model", "gpt-5.4")
+	viper.SetDefault("gateway.openai_device_binding.enabled", false)
+	viper.SetDefault("gateway.openai_device_binding.max_devices_per_account", 5)
+	viper.SetDefault("gateway.openai_device_binding.idle_ttl_days", 30)
 	viper.SetDefault("gateway.live.max_session_duration_seconds", 3600)
 	// OpenAI Responses WebSocket（默认开启；可通过 force_http 紧急回滚）
 	viper.SetDefault("gateway.openai_ws.enabled", true)
@@ -3384,6 +3400,14 @@ func (c *Config) Validate() error {
 	if c.Gateway.ImageNonstreamKeepaliveInterval != 0 &&
 		(c.Gateway.ImageNonstreamKeepaliveInterval < 5 || c.Gateway.ImageNonstreamKeepaliveInterval > 60) {
 		return fmt.Errorf("gateway.image_nonstream_keepalive_interval must be 0 or between 5-60 seconds")
+	}
+	if c.Gateway.OpenAIDeviceBinding.Enabled {
+		if c.Gateway.OpenAIDeviceBinding.MaxDevicesPerAccount <= 0 {
+			return fmt.Errorf("gateway.openai_device_binding.max_devices_per_account must be positive when enabled")
+		}
+		if c.Gateway.OpenAIDeviceBinding.IdleTTLDays <= 0 {
+			return fmt.Errorf("gateway.openai_device_binding.idle_ttl_days must be positive when enabled")
+		}
 	}
 	// 兼容旧键 sticky_previous_response_ttl_seconds
 	if c.Gateway.OpenAIWS.StickyResponseIDTTLSeconds <= 0 && c.Gateway.OpenAIWS.StickyPreviousResponseTTLSeconds > 0 {

@@ -46,6 +46,9 @@ func RegisterAdminRoutes(
 		// 账号管理
 		registerAccountRoutes(admin, h, stepUpAuth)
 
+		// OpenAI 下游设备绑定
+		registerOpenAIDeviceBindingRoutes(admin, h)
+
 		// 公告管理
 		registerAnnouncementRoutes(admin, h)
 
@@ -130,6 +133,14 @@ func RegisterAdminRoutes(
 
 		// 操作审计日志
 		registerAuditLogRoutes(admin, h, stepUpAuth)
+	}
+}
+
+func registerOpenAIDeviceBindingRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	devices := admin.Group("/openai-device-bindings")
+	{
+		devices.GET("", h.OpenAIGateway.AdminListDeviceBindings)
+		devices.DELETE("/:device_hash", h.OpenAIGateway.AdminDeleteDeviceBinding)
 	}
 }
 

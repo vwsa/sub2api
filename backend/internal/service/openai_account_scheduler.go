@@ -2137,14 +2137,78 @@ func (s *OpenAIGatewayService) SelectAccountWithSchedulerForImages(
 	return selection, decision, err
 }
 
-// selectAccountWithScheduler wraps selectAccountWithSchedulerOnce with a
-// fail-open second pass for the proxy stream circuit (#5056): when the only
-// reason no account is available is that every candidate sits behind a
-// quarantined proxy, the quarantine must degrade to a preference instead of
-// zeroing out capacity. The retry re-runs the exact same selection with the
-// quarantine checks bypassed, so healthy proxies always win the first pass
-// and quarantined ones only serve when nothing else can.
+// selectAccountWithScheduler adds strict downstream-device pinning around the
+// existing scheduler. Rejected candidates are released before another account
+// is considered, so device checks never consume account concurrency.
 func (s *OpenAIGatewayService) selectAccountWithScheduler(
+	ctx context.Context,
+	groupID *int64,
+	previousResponseID string,
+	sessionHash string,
+	requestedModel string,
+	excludedIDs map[int64]struct{},
+	requiredTransport OpenAIUpstreamTransport,
+	requiredCapability OpenAIEndpointCapability,
+	requiredImageCapability OpenAIImagesCapability,
+	requireCompact bool,
+	platform string,
+	previousResponseCanMove bool,
+	useUpstreamTokenCost bool,
+) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
+	if !s.openAIDeviceBindingEnabled(platform) {
+		return s.selectAccountWithSchedulerProxyFailOpen(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+	}
+	if OpenAIDeviceIDFromContext(ctx) == "" {
+		return nil, OpenAIAccountScheduleDecision{}, ErrOpenAIDeviceIDRequired
+	}
+
+	localExcluded := make(map[int64]struct{}, len(excludedIDs))
+	for accountID := range excludedIDs {
+		localExcluded[accountID] = struct{}{}
+	}
+	sawBoundAccountMismatch := false
+	sawFullAccount := false
+	for {
+		selection, decision, err := s.selectAccountWithSchedulerProxyFailOpen(ctx, groupID, previousResponseID, sessionHash, requestedModel, localExcluded, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+		if err != nil {
+			if sawBoundAccountMismatch {
+				return nil, decision, ErrOpenAIDeviceBoundAway
+			}
+			if sawFullAccount {
+				return nil, decision, ErrOpenAIDeviceLimit
+			}
+			return selection, decision, err
+		}
+		if selection == nil || selection.Account == nil {
+			return selection, decision, err
+		}
+
+		claim, claimErr := s.claimOpenAIDeviceBinding(ctx, selection.Account)
+		if claimErr != nil {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			return nil, decision, claimErr
+		}
+		if claim.Allowed {
+			return selection, decision, nil
+		}
+
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+		localExcluded[selection.Account.ID] = struct{}{}
+		if claim.CapacityFull {
+			sawFullAccount = true
+		} else if claim.BoundAccountID > 0 && claim.BoundAccountID != selection.Account.ID {
+			sawBoundAccountMismatch = true
+		}
+	}
+}
+
+// selectAccountWithSchedulerProxyFailOpen wraps one scheduler pass with a
+// fail-open second pass for the proxy stream circuit (#5056).
+func (s *OpenAIGatewayService) selectAccountWithSchedulerProxyFailOpen(
 	ctx context.Context,
 	groupID *int64,
 	previousResponseID string,

@@ -525,6 +525,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/device-bindings',
+    name: 'AdminDeviceBindings',
+    component: () => import('@/views/admin/DeviceBindingsView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Device Bindings',
+      titleKey: 'admin.deviceBindings.title',
+      descriptionKey: 'admin.deviceBindings.description'
+    }
+  },
+  {
     path: '/admin/plugins',
     name: 'AdminPlugins',
     component: () => import('@/views/admin/PluginsView.vue'),

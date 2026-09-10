@@ -1588,6 +1588,33 @@ export default {
         noData: '该账号暂无使用数据'
       }
     },
+    deviceBindings: {
+      title: '设备管理',
+      description: '查看用户设备与 OpenAI 上游账号的绑定关系，并释放不再使用的设备槽位。',
+      disabled: '设备绑定限制当前未启用。页面不会产生新的绑定记录。',
+      activeDevices: '活跃设备',
+      upstreamAccounts: '占用账号',
+      policy: '当前策略',
+      policyValue: '每账号 {count} 台 · 闲置 {days} 天释放',
+      searchPlaceholder: '搜索用户、API Key、上游账号或设备哈希',
+      visibleCount: '显示 {visible} / {total}',
+      device: '设备',
+      userAndKey: '用户 / API Key',
+      account: '上游账号',
+      activity: '最后活跃 / 到期',
+      firstSeen: '首次出现',
+      empty: '暂无活跃设备',
+      emptyHint: '用户通过带设备标识的 OMP 发起请求后，绑定会显示在这里。',
+      noMatches: '没有匹配的设备',
+      expired: '已过期',
+      expiresInHours: '{hours} 小时后释放',
+      expiresInDays: '{days} 天后释放',
+      unbind: '解除绑定',
+      unbindConfirm: '确认解除设备 {device}（{owner}）的绑定？该设备下次请求将重新占用槽位。',
+      unbindSuccess: '设备绑定已解除',
+      unbindFailed: '解除设备绑定失败',
+      loadFailed: '加载设备绑定失败'
+    },
 
     // Scheduled Tests
 }
